@@ -1,0 +1,146 @@
+package com.example.devicecare
+
+import android.app.Activity
+import android.app.ActivityManager
+import android.app.AlertDialog
+import android.app.ApplicationExitInfo
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.StatFs
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.provider.Settings
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+
+class MainActivity : Activity() {
+
+    private lateinit var output: TextView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad * 2, pad, pad)
+        }
+        output = TextView(this).apply { textSize = 15f; setPadding(0, 0, 0, pad) }
+        root.addView(output)
+        root.addView(button("فحص صحة الجهاز") { output.text = healthReport() })
+        root.addView(button("اختبار الاهتزاز") { vibrateTest() })
+        root.addView(button("مسح الملفات المؤقتة للتطبيق") { clearCache() })
+        root.addView(button("إعادة ضبط المصنع") { confirmReset() })
+        setContentView(ScrollView(this).apply { addView(root) })
+        output.text = healthReport()
+    }
+
+    private fun button(label: String, onClick: () -> Unit) =
+        Button(this).apply { text = label; setOnClickListener { onClick() } }
+
+    private fun healthReport(): String {
+        val sb = StringBuilder()
+        sb.appendLine("أندرويد ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+        sb.appendLine("الجهاز: ${Build.MANUFACTURER} ${Build.MODEL}\n")
+
+        val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        if (b != null) {
+            val level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+            val temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10.0
+            val health = when (b.getIntExtra(BatteryManager.EXTRA_HEALTH, 0)) {
+                BatteryManager.BATTERY_HEALTH_GOOD -> "جيدة"
+                BatteryManager.BATTERY_HEALTH_OVERHEAT -> "حرارة مرتفعة"
+                BatteryManager.BATTERY_HEALTH_DEAD -> "تالفة"
+                BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "جهد زائد"
+                else -> "غير معروفة"
+            }
+            sb.appendLine("البطارية: ${level * 100 / scale}% | الحرارة: $temp °C | الصحة: $health")
+        }
+
+        val stat = StatFs(Environment.getDataDirectory().path)
+        sb.appendLine("التخزين: متاح ${gb(stat.availableBytes)} من ${gb(stat.totalBytes)} GB")
+
+        val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        sb.appendLine("الذاكرة: متاح ${gb(mi.availMem)} من ${gb(mi.totalMem)} GB" +
+            if (mi.lowMemory) " (منخفضة!)" else "")
+
+        val sensors = (getSystemService(SENSOR_SERVICE) as SensorManager)
+            .getSensorList(Sensor.TYPE_ALL).size
+        sb.appendLine("عدد الحساسات: $sensors")
+
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+        val net = when {
+            caps == null -> "لا يوجد اتصال"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "بيانات الجوال"
+            else -> "متصل"
+        }
+        sb.appendLine("الشبكة: $net")
+
+        val pm = packageManager
+        sb.appendLine("كاميرا: ${yn(pm.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY))} | " +
+            "GPS: ${yn(pm.hasSystemFeature(PackageManager.FEATURE_LOCATION_GPS))} | " +
+            "بلوتوث: ${yn(pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH))}")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val exits = am.getHistoricalProcessExitReasons(packageName, 0, 5)
+            if (exits.isNotEmpty()) {
+                sb.appendLine("\nآخر إغلاقات هذا التطبيق:")
+                exits.forEach { sb.appendLine("• ${exitName(it.reason)}") }
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun exitName(r: Int) = when (r) {
+        ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE -> "تعطل"
+        ApplicationExitInfo.REASON_ANR -> "عدم استجابة (ANR)"
+        ApplicationExitInfo.REASON_LOW_MEMORY -> "نقص الذاكرة"
+        ApplicationExitInfo.REASON_USER_REQUESTED -> "أغلقه المستخدم"
+        else -> "سبب آخر ($r)"
+    }
+
+    private fun gb(bytes: Long) = "%.1f".format(bytes / 1_073_741_824.0)
+    private fun yn(v: Boolean) = if (v) "نعم" else "لا"
+
+    @Suppress("DEPRECATION")
+    private fun vibrateTest() {
+        val v = getSystemService(VIBRATOR_SERVICE) as Vibrator
+        if (!v.hasVibrator()) { toast("لا يوجد محرك اهتزاز"); return }
+        if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
+        else v.vibrate(500)
+        toast("هل شعرت بالاهتزاز؟")
+    }
+
+    private fun clearCache() {
+        cacheDir.deleteRecursively()
+        toast("تم مسح الملفات المؤقتة")
+    }
+
+    private fun confirmReset() {
+        AlertDialog.Builder(this)
+            .setTitle("تحذير")
+            .setMessage("إعادة ضبط المصنع تحذف كل بياناتك. خذ نسخة احتياطية أولاً. سيتم فتح الإعدادات لتكمل بنفسك.")
+            .setPositiveButton("فتح الإعدادات") { _, _ ->
+                startActivity(Intent(Settings.ACTION_PRIVACY_SETTINGS))
+            }
+            .setNegativeButton("إلغاء", null)
+            .show()
+    }
+
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+}
